@@ -1,82 +1,70 @@
 #include<stdio.h>    
-#include<string.h>    
+#include <signal.h>
+#include <netCore.h>
 
-#include<event.h>    
-#include<event2/listener.h>    
-#include<event2/bufferevent.h>    
-#include<event2/thread.h>
-
-void listener_cb(evconnlistener *listener, evutil_socket_t fd,
-	struct sockaddr *sock, int socklen, void *arg);
-
-void socket_read_cb(bufferevent *bev, void *arg);
-void socket_event_cb(bufferevent *bev, short events, void *arg);
-
-int main()
+int main(int argc, char **argv)
 {
-	//evthread_use_pthreads();//enable threads  
+	struct event_base *base;
+	struct evconnlistener *listener;
+	struct event *signal_event;
 
 	struct sockaddr_in sin;
-	memset(&sin, 0, sizeof(struct sockaddr_in));
+
+#ifdef WIN32
+	WSADATA wsa_data;
+	WSAStartup(0x0201, &wsa_data);
+	evthread_use_windows_threads();//win上设置
+#else
+	evthread_use_pthreads();    //unix上设置
+#endif
+
+	//创建event_base
+	base = event_base_new();
+	if (!base)
+	{
+		fprintf(stderr, "Could not initialize libevent!\n");
+		return 1;
+	}
+
+	evthread_make_base_notifiable(base);
+	memset(&sin, 0, sizeof(sin));
 	sin.sin_family = AF_INET;
-	sin.sin_port = htons(9999);
+	sin.sin_port = htons(PORT);
+	//sin.sin_addr.s_addr = inet_addr("192.168.31.243"); 监听所有本机地址
 
-	event_base *base = event_base_new();
-	evconnlistener *listener
-		= evconnlistener_new_bind(base, listener_cb, base,
-			LEV_OPT_REUSEABLE | LEV_OPT_CLOSE_ON_FREE,
-			10, (struct sockaddr*)&sin,
-			sizeof(struct sockaddr_in));
+	//基于eventbase 生成listen描述符并绑定
+	//设置了listener_cb回调函数，当有新的连接登录的时候
+	//触发listener_cb
+	listener = evconnlistener_new_bind(base, listener_cb, (void *)base,
+		LEV_OPT_LEAVE_SOCKETS_BLOCKING|LEV_OPT_REUSEABLE | LEV_OPT_CLOSE_ON_FREE
+		| LEV_OPT_THREADSAFE, -1,
+		(struct sockaddr*)&sin,
+		sizeof(sin));
 
+	if (!listener)
+	{
+		fprintf(stderr, "Could not create a listener!\n");
+		return 1;
+	}
+
+	//设置终端信号，当程序收到SIGINT后调用signal_cb
+	signal_event = evsignal_new(base, SIGINT, signal_cb, (void *)base);
+
+	if (!signal_event || event_add(signal_event, NULL)<0)
+	{
+		fprintf(stderr, "Could not create/add a signal event!\n");
+		return 1;
+	}
+	//event_base消息派发
 	event_base_dispatch(base);
 
+	//释放生成的evconnlistener
 	evconnlistener_free(listener);
+	//释放生成的信号事件
+	event_free(signal_event);
+	//释放event_base
 	event_base_free(base);
 
+	printf("netServer Closed!\n");
 	return 0;
-}
-
-
-//一个新客户端连接上服务器了  
-//当此函数被调用时，libevent已经帮我们accept了这个客户端。该客户端的
-//文件描述符为fd
-void listener_cb(evconnlistener *listener, evutil_socket_t fd,
-	struct sockaddr *sock, int socklen, void *arg)
-{
-	printf("accept a client %d\n", fd);
-
-	event_base *base = (event_base*)arg;
-
-	//为这个客户端分配一个bufferevent  
-	bufferevent *bev = bufferevent_socket_new(base, fd,
-		BEV_OPT_CLOSE_ON_FREE);
-
-	bufferevent_setcb(bev, socket_read_cb, NULL, socket_event_cb, NULL);
-	bufferevent_enable(bev, EV_READ | EV_PERSIST);
-}
-
-
-void socket_read_cb(bufferevent *bev, void *arg)
-{
-	char msg[4096];
-
-	size_t len = bufferevent_read(bev, msg, sizeof(msg) - 1);
-
-	msg[len] = '\0';
-	printf("server read the data %s\n", msg);
-
-	char reply[] = "I has read your data";
-	bufferevent_write(bev, reply, strlen(reply));
-}
-
-
-void socket_event_cb(bufferevent *bev, short events, void *arg)
-{
-	if (events & BEV_EVENT_EOF)
-		printf("connection closed\n");
-	else if (events & BEV_EVENT_ERROR)
-		printf("some other error\n");
-
-	//这将自动close套接字和free读写缓冲区  
-	bufferevent_free(bev);
 }
